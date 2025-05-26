@@ -1,4 +1,5 @@
 from ai_engine import OthelloAI
+
 import json
 
 def main():
