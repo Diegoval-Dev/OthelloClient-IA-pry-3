@@ -1,5 +1,13 @@
 import time
 import random
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import json
+import os
+from copy import deepcopy
+
+
 
 # Definición de features y pesos iniciales
 FEATURES = [
@@ -32,20 +40,80 @@ def initial_board():
 
 class OthelloAI:
     def __init__(self):
+        weights_path = "weights_trained.json"
         self.start_time = 0
         self.time_limit = 0
         self.best_move = None
         self.max_depth_reached = 0
         self.transposition_table = {}
-        self.weights = {
-            'positional_sum':  10.0,
-            'mobility_ratio':  78.0,
-            'parity_ratio':    10.0,
-            'frontier_diff':   12.0,
-        }
+        if os.path.exists(weights_path):
+            with open(weights_path) as f:
+                self.weights = json.load(f)
+            print(f"[AI] Pesos cargados desde {weights_path}")
+        else:
+            # pesos iniciales por defecto
+            self.weights = {
+                'positional_sum':  10.0,
+                'mobility_ratio':  78.0,
+                'parity_ratio':    10.0,
+                'frontier_diff':   12.0,
+            }
         # Parámetros TD-Learning
         self.gamma = 0.99
         self.alpha = 1e-4
+
+    def valid_moves(self, board, symbol):
+        """
+        Escanea cada casilla; replica is_valid_move de OthelloGame
+        para devolver lista de (r,c) que el servidor aceptará.
+        """
+        def is_valid(board, symbol, r, c):
+            if board[r][c] != 0:
+                return False
+            opponent = -symbol
+            directions = [(-1,0),(1,0),(0,-1),(0,1),(-1,-1),(-1,1),(1,-1),(1,1)]
+            for dr,dc in directions:
+                rr, cc = r+dr, c+dc
+                found_op = False
+                while 0 <= rr < 8 and 0 <= cc < 8 and board[rr][cc] == opponent:
+                    rr += dr; cc += dc
+                    found_op = True
+                if found_op and 0 <= rr < 8 and 0 <= cc < 8 and board[rr][cc] == symbol:
+                    return True
+            return False
+
+        moves = []
+        for r in range(8):
+            for c in range(8):
+                if is_valid(board, symbol, r, c):
+                    moves.append((r, c))
+        return moves
+    def _ensure_valid(self, board, symbol, move):
+        """
+        Si `move` no está en valid_moves, elige como respaldo el que
+        maximice self.evaluate().
+        """
+        valids = self.valid_moves(board, symbol)
+        if move in valids:
+            return move
+
+        # Si por algún motivo self.best_move era None o ilegal:
+        best_move, best_val = None, -float('inf')
+        for (r, c) in valids:
+            idx = r*8 + c
+            # Reconstruye bitboards según symbol
+            white_bb, black_bb = self.board_to_bitboards(board)
+            if symbol == 1:
+                my_bb, opp_bb = white_bb, black_bb
+            else:
+                my_bb, opp_bb = black_bb, white_bb
+            new_my, new_opp = self.apply_move(my_bb, opp_bb, idx)
+            val = self.evaluate(new_my, new_opp)
+            if val > best_val:
+                best_val, best_move = val, (r, c)
+
+        return best_move
+
 
     def board_to_bitboards(self, board):
         white_bb = black_bb = 0
@@ -186,7 +254,8 @@ class OthelloAI:
                 depth+=1
             except TimeoutError:
                 break
-        return self.best_move
+        final = self._ensure_valid(board, symbol, self.best_move)
+        return final
 
     def self_play_and_train(self, games=100):
         """
@@ -200,7 +269,7 @@ class OthelloAI:
             while True:
                 my_bb, opp_bb = self.board_to_bitboards(board) if symbol==1 else self.board_to_bitboards([[ -x for x in row] for row in board])
                 feats = self.extract_features(my_bb, opp_bb)
-                move = self.find_best_move(board, symbol, time_limit=0.1)
+                move = self.find_best_move(board, symbol, time_limit=0.01)
                 if move is None:
                     # pase, sin jugadas
                     history.append((feats, symbol))
